@@ -1,0 +1,235 @@
+---
+title: "Śledzie"
+author: "Bartosz Kram"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: 
+      collapsed: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Cel projektu
+
+Problemem, który zostanie poddany analizie w prezentowanym raporcie jest wpływ różnych czynników na rozmiar śledzia oceanicznego wyławianego w Europie. Na przestrzeni ostatnich lat zauważono, że rozmiar ryby stopniowo spada. Zbiór analizowanych danych przedstawia pomiary śledzi oraz warunków, w jakich żyły na przestrzeni ostatnich 60 lat. W ramach połowu jednostki losowo wybierano od 50 do 100 sztuk trzyletnich śledzi. 
+
+## Podsumowanie
+
+Podczas przeprowadzania analizy w pierwszym kroku uzupełnione zostały niepełne dane. Następnie w postaci histogramów zaprezentowane zostały rozkłady wartości poszczególnych atrybutów. Przedstawienie atrybutów w postaci macierzy korelacji pozwoliło zobserwować silną zależność między długością śledzi, a temperaturą przy powierzchni wody. 
+
+Podczas tworzenia modelu predykcyjnego, który na podstawie zawartych w zbiorze danych cech miał przewidziec rozmiar śledzi wykorzystany algorytm RandomForest. Model został nauczony na treningowym zbiorze danych stanowiącym 80% wszystkich posiadanych danych, a następnie przetestowany na pozostałych 20% danych. 
+
+Po dokonaniu analizy możemy zaobserwować, że najbardziej wyraźny wpływ na wielkość wyławianych śledzi ma temperatura przy powierzchni wody (sst) - jej stopniowy wzrost bezpośrednio przyczynił się do spadku średniej wielkości śledzi. Dodatkowo bardzo ważnym czynnikiem okazała się dostępność planktonu - szczególnie widłonogów, której spadek rownież wpłynął na rozmiar śledzi. 
+
+## Ładowanie bibliotek
+
+```{r libraries, message=FALSE}
+library(ggplot2)
+library(DT)
+library(kableExtra)
+library(dplyr)
+library(plotly)
+library(caret)
+library(gridExtra)    
+library(randomForest)
+```
+
+## Powtarzalność
+Kod zapewniający powtarzalność eksperymentów
+
+```{r setSeed}
+set.seed(23)
+```
+
+## Ładowanie danych
+
+Kod pozwalający na załadowanie danych z pliku csv. Dane zawierają 52583 rekordy opisane 16 atrybutami:
+
+
+Kolumna|Opis
+------|---------------------------------------------------------------
+length| długość złowionego śledzia [cm]
+cfin1| dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 1]
+cfin2| dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 2]
+chel1| dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 1]
+chel2| dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 2]
+lcop1| dostępność planktonu [zagęszczenie widłonogów gat. 1]
+lcop2| dostępność planktonu [zagęszczenie widłonogów gat. 2]
+fbar| natężenie połowów w regionie [ułamek pozostawionego narybku]
+recr| roczny narybek [liczba śledzi]
+cumf| łączne roczne natężenie połowów w regionie [ułamek pozostawionego narybku]
+totaln| łączna liczba ryb złowionych w ramach połowu [liczba śledzi]
+sst| temperatura przy powierzchni wody [°C]
+sal| poziom zasolenia wody [Knudsen ppt]
+xmonth| miesiąc połowu [numer miesiąca]
+nao| oscylacja północnoatlantycka [mb]
+
+```{r loadData}
+raw_data <- read.csv(url("http://www.cs.put.poznan.pl/dbrzezinski/teaching/sphd/sledzie.csv"), na.strings = "?")
+kable(head(raw_data, 10))%>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+## Statystyki
+Sekcja prezentująca podstawowe statystyki dla zbioru danych:
+
+Atrybut|Wartość
+--------------|-----------------
+Liczba kolumn | `r ncol(raw_data)`
+Liczba wierszy| `r nrow(raw_data)`
+
+```{r summarizing, message=FALSE, warning=FALSE, cache.lazy=FALSE, cache=TRUE}
+summary(raw_data[,2:16])
+
+no_na_data <- sum(complete.cases(raw_data))
+na_data <- nrow((raw_data)) - no_na_data
+```
+
+## Przetwarzanie brakujących danych
+
+### Analiza brakujących danych
+Możemy zauważyć, że w badanym zbiorze danych aż `r na_data` rekordów posiada brakujące dane. 
+Niestety usunięcie takiej ilości rekordów z badanego zbioru mogłoby wpłynąć negatywnie na jakość analizy dlatego konieczne jest uzupełnienie brakujących wartości. 
+Analizując przedstawione statystyki możemy zaobserwować, że jedynie niektóre kolumny posiadają brakujące wartości. Są to dane dotyczące dostępności planktonu oraz temperatury przy powierzchni wody.
+To właśnie dane w tych cechach należy uzupełnić.
+
+Przyglądając się danym możemy zauważyć, że braki występują w sąsiedztwie danych kompletnych. Wynika to prawdopodobnie z faktu, że sąsiadujące rekordy pochodzą z tego samego połowu, a braki w danych wynikają z nieuwagi podczas ich zbierania.
+
+### Uzupełnienie danych
+
+Skrypt uzupełniający dane pobierany jest z pliku "ZED_grouping.R".
+
+Dla każdego rekordu z brakującą wartością cechy pobierane jest najbliższe 6 kompletnych rekordów. Na podstawie pobranej grupy wyliczana jest mediana brakującej wartości, która następnie wstawiana jest jako wartość badanej cechy w niekompletnym rekordzie.
+Czynność powtarzana jest dla każdej cechy zawierającej brakujące dane.
+
+```{r fillingMissingData, message=FALSE, warning=FALSE, cache=TRUE}
+
+# Załadowanie skryptu uzupełniającego dane
+if(!exists("fillMissingValues", mode="function")) source("ZED_grouping.R")
+
+filled_data <- fillMissingValues(raw_data)
+filled_data
+```
+
+## Analiza wartości atrybutów
+
+```{r attribute_histograms, cache=TRUE, warning=FALSE}
+ggplot(filled_data, mapping = aes(x = cfin1)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = cfin2)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = chel1)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = chel2)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = lcop1)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = lcop2)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = fbar)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = recr)) + geom_histogram(binwidth = 60)
+ggplot(filled_data, mapping = aes(x = cumf)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = totaln)) + geom_histogram(binwidth = 60)
+ggplot(filled_data, mapping = aes(x = sst)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = sal)) + geom_histogram(binwidth = 0.005)
+ggplot(filled_data, mapping = aes(x = xmonth)) + geom_histogram(binwidth = 0.01)
+ggplot(filled_data, mapping = aes(x = nao)) + geom_histogram(binwidth = 0.05)
+```
+
+## Korelacja między atrybutami
+
+Korelacja między atrybutami została przedstawiona w postaci macierzy korelacji.
+```{r attributesCorrelation}
+
+kable(cor(filled_data), digits = 2)%>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))%>%
+  row_spec(0,angle = -45)
+```
+
+
+## Analiza rozmiaru śledzi w czasie
+
+Kod umożliwiający analizę rozmiaru śledzi w czasie.
+
+W celu analizy rozmiaru rozmiaru śledzi w czasie, na podstawie informacji o rocznym narybku oraz wiedzy, że dane występują w porządku chronologicznym utworzona została dodatkowa kolumna "year". 
+
+```{r herringInTime, cache= TRUE,warning=FALSE, message=FALSE}
+if(!exists("add_year", mode="function")) source("ZED_grouping.R")
+
+mean_sample <- filled_data[,c("recr","length")]
+recr_groups <- aggregate(mean_sample, by = list(mean_sample$recr), FUN = mean)
+year_data <- add_year(filled_data, recr_groups)
+aggreagated_years <- aggregate(year_data, by= list(year_data$year), FUN = mean)%>%select(year, length, lcop2, lcop1, chel2, sst)
+
+interactive_plot <- ggplot(aggreagated_years, mapping = aes(x = year, y = length))+geom_smooth()
+ggplotly(interactive_plot)
+```
+
+## Regresor
+
+W następnym kroku podjęta została próba utworzenie regresora, który przewidzi rozmiar śledzi. Dane zostały podzielone na zbiór uczący oraz testowy w proporcji 80%/20%.
+Wykorzystany został algorytm RandomForest optymalizujący model według miary RMSE.
+
+```{r regression, cache=TRUE, message=FALSE, warning = FALSE}
+sig_attr_selection <- filled_data%>%select(length, cfin1, cfin2, chel1, chel2, lcop1, lcop2, fbar, recr, cumf, totaln, sst, sal, nao)
+inTraining <- createDataPartition(y = sig_attr_selection$length, p=.8, list=FALSE)
+
+training_data <- sig_attr_selection[inTraining,]
+test_data <- sig_attr_selection[-inTraining,]
+
+rfGrid <- expand.grid(mtry = 1:10)
+ctrl <- trainControl(
+    method = "repeatedcv",
+    number = 5,
+    repeats = 5)
+
+fit <- train(length ~ .,
+             data = training_data,
+             method = 'rf',
+             trControl = ctrl,
+             metric = "RMSE",
+             tuneGrid=rfGrid,
+             importance = TRUE,
+             ntree=10)
+
+ggplot(fit) + theme_bw()
+
+rfClasses <-predict(fit, newdata = test_data[-1])
+rmse <- RMSE(pred = rfClasses, obs = test_data$length)
+r2 <- R2(pred = rfClasses, obs = test_data$length)
+
+```
+
+Algorytm osiągnął najlepszy rezultat dla parametru "mtry" równego 3.
+
+Miara|Wartość
+--------------|-----------------
+RMSE | `r rmse`
+R2| `r r2`
+
+## Analiza ważności atrybutów w wyuczonym modelu
+
+Na podstawie wyuczonego modelu oszacowane zostały wagi każdego z atrybutów zbioru danych. 
+
+```{r importance }
+attr_importance <- varImp(fit, scale = FALSE)
+ggplot(attr_importance)
+```
+
+Możemy przyjrzeć się zmiane najbardziej istotnych cech w czasie.
+
+```{r attribute_plots}
+lcop2_plot <- ggplot(filled_data, mapping = aes(x = X, y = lcop2))+geom_smooth()+ggtitle("Dostępność planktonu [zagęszczenie widłonogów gat. 2]")
+ggplotly(lcop2_plot)
+chel2_plot <- ggplot(filled_data, mapping = aes(x = X, y = chel2))+geom_smooth()+ggtitle("Dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 2]")
+ggplotly(chel2_plot)
+lcop1_plot <- ggplot(filled_data, mapping = aes(x = X, y = lcop1))+geom_smooth()+ggtitle("Dostępność planktonu [zagęszczenie widłonogów gat. 1]")
+ggplotly(lcop1_plot)
+fbar_plot <- ggplot(filled_data, mapping = aes(x = X, y = fbar))+geom_smooth()+ggtitle("Ułamek pozostawionego narybku")
+ggplotly(fbar_plot)
+sst_plot <- ggplot(filled_data, mapping = aes(x = X, y = sst))+geom_smooth()+ggtitle("Temperatura przy powierzchni wody [°C]")
+ggplotly(sst_plot)
+
+```
+
+Oczywiście wpływ na wielkość wyławianych śledzi miało wiele czynników, jednak wśród najbardziej wpływowych wyróżnić możemy dostępność planktonu oraz temperaturę przy powierzchni wody.
